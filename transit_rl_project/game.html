@@ -1,0 +1,139 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kilkenny Transit Tycoon</title>
+<style>
+:root{--bg:#fff;--fg:#222;--mut:#777;--pan:#f6f6f4;--bd:#ddd;--ok:#1a8a3a;--bad:#c62828}
+@media(prefers-color-scheme:dark){:root{--bg:#1d1d1f;--fg:#eee;--mut:#999;--pan:#26262a;--bd:#3a3a3f;--ok:#5fd07f;--bad:#ff6b6b}}
+html,body{height:100%;margin:0;font:13px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+body{display:flex}#side{width:300px;padding:12px;background:var(--pan);border-right:1px solid var(--bd);overflow:auto;box-sizing:border-box}
+#cv{flex:1;min-width:0;display:block;background:#fff;cursor:crosshair}
+h3{margin:.6em 0 .4em;font-size:14px}label{display:block;margin:2px 0}table{width:100%;border-collapse:collapse}td{padding:2px 0}td+td{text-align:right}
+.mut{color:var(--mut)}.ok{color:var(--ok)}.bad{color:var(--bad)}.sw{display:inline-block;width:12px;height:4px;margin-right:6px;vertical-align:middle;border-radius:2px}
+button{padding:3px 8px;margin:2px 2px 2px 0;cursor:pointer}button.on{background:#1e78ff;color:#fff}#big{font-size:20px;font-weight:600}
+#msg{min-height:16px;color:var(--bad);margin:4px 0}.rl{cursor:pointer;padding:1px 0}.rl:hover{text-decoration:underline}
+</style></head><body>
+<div id="side"><h3>Kilkenny Transit Tycoon</h3><div id="ui" hidden>
+<div id="big"></div><div id="hud"></div>
+<div><button data-a="spd" data-v="0">❚❚</button><button data-a="spd" data-v="1" class="on">1×</button><button data-a="spd" data-v="4">4×</button><button data-a="spd" data-v="12">12×</button></div>
+<div><button data-a="buy">Buy bus</button><button data-a="sell">Sell idle bus</button></div><div id="msg"></div>
+<div class="mut"><b>Click</b> empty ground: place stop (snaps to road/stop). <b>Drag</b> from a stop across other stops: new route (release on empty road to add a stop).
+Select a route then drag from its end stop to extend it. <b>Click</b> a stop or route line to inspect.</div>
+<label><input type="checkbox" id="oB" checked> buildings</label><label><input type="checkbox" id="oR"> catchments</label><label><input type="checkbox" id="oD"> demand heat</label>
+<div id="insp"></div><h3>Routes</h3><div id="leg"></div></div>
+<div id="drop">Load <code>viewer_data.json</code>:<br><br><input type="file" id="file" accept=".json"></div></div>
+<canvas id="cv"></canvas>
+<script id="data" type="application/json"></script>
+<script>
+// ---- balance knobs (euro, minutes, metres) ----
+const C={cash:250000,fleet:6,busPrice:40000,stopCost:500,wage:22,fuel:.9,maint:45,stopUp:4,cap:60,speed:420,dwell:.4,share:.14,maxWait:30,shortHops:3,
+ fare:{short:1.3,single:2.2,day:1.7},dayP:.15};
+const $=i=>document.getElementById(i),cv=$('cv'),g=cv.getContext('2d'),BC=['#cdbfae','#f0a64a','#3fa7a0','#9b7fbf','#4a7fd6','#7cc27c','#bbb'];
+const col=i=>`hsl(${(i*137.508)%360},70%,${i%2?42:50}%)`,eur=v=>'€'+Math.round(v).toLocaleString();
+let M,nx=[],ny=[],adj=[],grid=new Map(),V={s:1,x:0,y:0},stops=[],routes=[],sid=0,rid=0,sel=null,mode='',cash=C.cash,fleet=C.fleet,day=0,clock=355,T=355,spd=1,svc=false,drag=null;
+const nd=()=>({rev:0,wage:0,fuel:0,maint:0,pax:0,ws:0,wn:0,js:0,jn:0,short:0,single:0,day:0,lost:0});let gd=nd(),gy=nd();
+const msg=t=>{$('msg').textContent=t;clearTimeout(msg.t);msg.t=setTimeout(()=>$('msg').textContent='',3500)};
+// ---- road graph ----
+function build(){const id=new Map(),nid=(x,y)=>{const k=x+','+y;let i=id.get(k);if(i===undefined){i=nx.length;id.set(k,i);nx.push(x);ny.push(y);adj.push([]);const c=(x/100|0)+','+(y/100|0);(grid.get(c)||grid.set(c,[]).get(c)).push(i)}return i};
+ M.roads.forEach(r=>{const p=r[1];let a=nid(p[0],p[1]);for(let k=2;k<p.length;k+=2){const b=nid(p[k],p[k+1]),d=Math.hypot(p[k]-p[k-2],p[k+1]-p[k-1]);if(a!==b){adj[a].push([b,d]);adj[b].push([a,d])}a=b}})}
+function nearNode(x,y,r){let best=-1,bd=r,c=Math.ceil(r/100);for(let i=-c;i<=c;i++)for(let j=-c;j<=c;j++)for(const n of grid.get(((x/100|0)+i)+','+((y/100|0)+j))||[]){const d=Math.hypot(nx[n]-x,ny[n]-y);if(d<bd&&adj[n].length){bd=d;best=n}}return best}
+const hp=(h,x)=>{h.push(x);let i=h.length-1;while(i&&h[i>>1][0]>h[i][0]){[h[i],h[i>>1]]=[h[i>>1],h[i]];i>>=1}},
+ hq=h=>{const t=h[0],l=h.pop();if(h.length){h[0]=l;let i=0;for(;;){let a=2*i+1,b=a+1,m=i;if(a<h.length&&h[a][0]<h[m][0])m=a;if(b<h.length&&h[b][0]<h[m][0])m=b;if(m==i)break;[h[i],h[m]]=[h[m],h[i]];i=m}}return t};
+function sp(a,b){const dist=new Map([[a,0]]),prev=new Map(),done=new Set(),h=[[0,a]];
+ while(h.length){const[d,u]=hq(h);if(done.has(u))continue;done.add(u);if(u===b)break;for(const[v,w]of adj[u]){const q=d+w;if(q<(dist.get(v)??1e18)){dist.set(v,q);prev.set(v,u);hp(h,[q,v])}}}
+ if(!done.has(b))return null;const p=[b];while(p[p.length-1]!==a)p.push(prev.get(p[p.length-1]));return p.reverse()}
+// ---- model ----
+const depot=()=>fleet-routes.reduce((a,r)=>a+r.nb,0),relink=()=>stops.forEach(s=>s.routes=routes.filter(r=>r.stops.includes(s)));
+function recalc(){const R=M.R;stops.forEach(s=>{s.rate=new Float32Array(24);s.attr=0});
+ M.zones.forEach(z=>{const w=stops.map(s=>Math.max(0,1-(Math.hypot(z[0]-s.x,z[1]-s.y)/R)**2)),t=Math.max(1,w.reduce((a,b)=>a+b,0)),tot=z[2].reduce((a,b)=>a+b,0)/24;
+  stops.forEach((s,i)=>{if(w[i]>0){const f=w[i]/t;for(let h=0;h<24;h++)s.rate[h]+=z[2][h]*f*C.share/60;s.attr+=tot*f}})})}
+function mkStop(n){let s=stops.find(s=>s.n===n);if(s)return s;if(cash<C.stopCost){msg('Not enough cash for a stop');return null}
+ cash-=C.stopCost;s={id:++sid,n,x:nx[n],y:ny[n],wait:[],st:{b:0,ws:0,wn:0},routes:[]};stops.push(s);recalc();return s}
+function rebuild(r){const pts=[r.stops[0].n],cd=[0],sd=[0];let c=0;
+ for(let i=1;i<r.stops.length;i++){const p=sp(r.stops[i-1].n,r.stops[i].n);if(!p)return false;for(let k=1;k<p.length;k++){c+=Math.hypot(nx[p[k]]-nx[p[k-1]],ny[p[k]]-ny[p[k-1]]);pts.push(p[k]);cd.push(c)}sd.push(c)}
+ if(c<1)return false;r.pts=pts.map(n=>[nx[n],ny[n]]);r.cd=cd;r.sd=sd;r.L=c;return true}
+function place(r){r.buses=Array.from({length:r.nb},(_,i)=>({u:i*2*r.L/r.nb,dw:0,pax:[]}))}
+function edit(r,list){const old=r.stops;r.stops=list;if(!rebuild(r)){r.stops=old;rebuild(r);msg('No road connection there');return false}place(r);relink();return true}
+function mkRoute(list){const r={id:++rid,stops:list,nb:0,d:nd(),y:nd(),buses:[]};if(!rebuild(r)){msg('No road connection there');return}
+ if(depot()>0)r.nb=1;place(r);routes.push(r);relink();sel={t:'r',o:r}}
+function delRoute(r){routes.splice(routes.indexOf(r),1);relink();if(sel&&sel.o===r)sel=null}
+function delStop(s){stops.splice(stops.indexOf(s),1);for(const r of routes.slice()){if(!r.stops.includes(s))continue;const l=r.stops.filter(x=>x!==s);if(l.length<2)delRoute(r);else edit(r,l)}recalc();relink();sel=null}
+function addStopTo(r,s){if(r.stops.includes(s)){msg('Already on this route');return}edit(r,[...r.stops,s])}
+function setBuses(r,k){if(k>0&&depot()<=0){if(cash<C.busPrice){msg('No idle bus and not enough cash to buy one');return}cash-=C.busPrice;fleet++}if(r.nb+k<0)return;r.nb+=k;place(r)}
+// ---- simulation ----
+function pos(r,u){const s=u<=r.L?u:2*r.L-u;let lo=0,hi=r.cd.length-1;while(hi-lo>1){const m=lo+hi>>1;r.cd[m]<=s?lo=m:hi=m}const t=(s-r.cd[lo])/Math.max(1e-6,r.cd[hi]-r.cd[lo]);return[r.pts[lo][0]+t*(r.pts[hi][0]-r.pts[lo][0]),r.pts[lo][1]+t*(r.pts[hi][1]-r.pts[lo][1])]}
+function spawn(s,h,dt){const rs=s.routes.filter(r=>r.nb>0);if(!rs.length)return;let l=s.rate[h]*dt,n=Math.floor(l)+(Math.random()<l%1?1:0);
+ while(n--){const r=rs[Math.random()*rs.length|0],o=r.stops.filter(x=>x!==s);let w=o.reduce((a,x)=>a+x.attr+1,0),q=Math.random()*w,d=o[0];for(const x of o){q-=x.attr+1;if(q<=0){d=x;break}}
+  const hops=Math.abs(r.stops.indexOf(d)-r.stops.indexOf(s)),ft=Math.random()<C.dayP?'day':hops<=C.shortHops?'short':'single';s.wait.push({r,d,t:T,f:C.fare[ft],ft})}}
+function serve(r,b,k,dir){const s=r.stops[k];b.pax=b.pax.filter(p=>{if(p.d!==s)return true;r.d.js+=T-p.t;r.d.jn++;return false});
+ s.wait=s.wait.filter(p=>{if(p.r!==r||b.pax.length>=C.cap)return true;if(Math.sign(r.stops.indexOf(p.d)-k)!==dir)return true;
+  b.pax.push(p);const w=T-p.t;cash+=p.f;r.d.rev+=p.f;gd.rev+=p.f;r.d.ws+=w;r.d.wn++;r.d.pax++;r.d[p.ft]++;s.st.ws+=w;s.st.wn++;return false})}
+function moveBus(r,b,dt){if(b.dw>0){b.dw-=dt;return}const L=r.L,u0=b.u,u1=u0+C.speed*dt,n=r.stops.length;let hit=-1,hx=0;
+ for(let k=0;k<n;k++)for(const ux of k==0?[2*L]:k==n-1?[L]:[r.sd[k],2*L-r.sd[k]])if(u0<ux&&ux<=u1&&(hit<0||ux<hx)){hit=k;hx=ux}
+ const e=hit>=0?hx:u1,f=(e-u0)/1000*C.fuel;r.d.fuel+=f;gd.fuel+=f;cash-=f;b.u=e>=2*L?e-2*L:e;
+ if(hit>=0){serve(r,b,hit,hit==0?1:hit==n-1?-1:hx==r.sd[hit]?1:-1);b.dw=C.dwell}}
+function endDay(){for(const r of routes){const m=r.nb*C.maint;r.d.maint+=m;gd.maint+=m;cash-=m}const idle=depot()*C.maint+stops.length*C.stopUp;gd.maint+=idle;cash-=idle;
+ routes.forEach(r=>{r.y=r.d;r.d=nd()});gy=gd;gd=nd();day++}
+function step(dt){T+=dt;clock+=dt;if(clock>=1440){clock-=1440;endDay()}const h=clock/60|0,on=h>=6&&h<23;
+ if(on!==svc){svc=on;routes.forEach(place)}
+ if(!on){stops.forEach(s=>s.wait.length=0);return}
+ stops.forEach(s=>{spawn(s,h,dt);s.wait=s.wait.filter(p=>{if(T-p.t>C.maxWait){p.r.d.lost++;gd.lost++;return false}return true})});
+ routes.forEach(r=>{const w=r.nb*C.wage/60*dt;r.d.wage+=w;gd.wage+=w;cash-=w;r.buses.forEach(b=>moveBus(r,b,dt))})}
+// ---- UI ----
+const cost=d=>d.wage+d.fuel+d.maint,avg=(a,n)=>n?(a/n).toFixed(1)+' min':'–',pn=v=>`<span class="${v>=0?'ok':'bad'}">${eur(v)}</span>`;
+const row=(a,b)=>`<tr><td class=mut>${a}</td><td>${b}</td></tr>`;
+function hud(){const h=clock/60|0;$('big').innerHTML=`<span class="${cash<0?'bad':''}">${eur(cash)}</span>`;
+ $('hud').innerHTML=`<table>${row('Day '+(day+1),String(h).padStart(2,'0')+':'+String(Math.floor(clock%60)).padStart(2,'0')+(svc?'':' (night)'))}${row('Today revenue / costs',eur(gd.rev)+' / '+eur(cost(gd)))}${row('Today net',pn(gd.rev-cost(gd)))}${row('Yesterday net',pn(gy.rev-cost(gy)))}${row('Fleet (idle)',fleet+' ('+depot()+')')}</table>`}
+function insp(){let o='';if(sel&&sel.t==='s'&&stops.includes(sel.o)){const s=sel.o,w=s.wait,now=w.length?w.reduce((a,p)=>a+T-p.t,0)/w.length:0,mx=w.reduce((a,p)=>Math.max(a,T-p.t),0);
+  o=`<h3>Stop #${s.id}</h3><table>${row('Waiting now',w.length)}${row('Avg / longest wait now',now.toFixed(1)+' / '+mx.toFixed(1)+' min')}${row('Boarded (all time)',s.st.b||s.st.wn)}${row('Avg wait (boarded)',avg(s.st.ws,s.st.wn))}${row('Demand / hr (peak)',Math.max(...s.rate).toFixed(1))}</table>`;
+  o+=`<div>Routes: `+routes.map(r=>r.stops.includes(s)?`<button data-a="rmfrom" data-v="${r.id}">Remove from R${r.id}</button>`:`<button data-a="addto" data-v="${r.id}">Add to R${r.id}</button>`).join('')+`</div><button data-a="dels">Delete stop</button>`}
+ else if(sel&&sel.t==='r'&&routes.includes(sel.o)){const r=sel.o,d=r.d,run=r.L/C.speed+r.stops.length*C.dwell,hw=r.nb?(2*run)/r.nb:0,onb=r.buses.reduce((a,b)=>a+b.pax.length,0);
+  o=`<h3><span class=sw style="background:${col(r.id)}"></span>Route R${r.id}</h3><div><button data-a="bus-" data-v="${r.id}">− bus</button><button data-a="bus+" data-v="${r.id}">+ bus</button><button data-a="addmode" class="${mode?'on':''}">Add stops…</button><button data-a="delr" data-v="${r.id}">Delete route</button></div>
+  <table>${row('Buses',r.nb+' (idle in depot: '+depot()+')')}${row('Passengers on board',onb)}${row('Stops / length',r.stops.length+' / '+(r.L/1000).toFixed(1)+' km')}${row('One-way journey time',run.toFixed(1)+' min')}${row('Est. headway',hw?hw.toFixed(1)+' min':'–')}
+  ${row('Avg wait (boarded)',avg(d.ws,d.wn))}${row('Avg door-to-door',avg(d.js,d.jn))}${row('Pax today',d.pax+' (short '+d.short+' · single '+d.single+' · day '+d.day+')')}${row('Gave up waiting',d.lost)}
+  ${row('Fares earned today',eur(d.rev))}${row('Wages',eur(d.wage))}${row('Fuel',eur(d.fuel))}${row('Maintenance (billed midnight)',eur(d.maint)+' · '+eur(r.nb*C.maint)+'/day')}${row('Profit today',pn(d.rev-cost(d)))}${row('Yesterday profit',pn(r.y.rev-cost(r.y)))}</table>`}
+ $('insp').innerHTML=o;$('leg').innerHTML=routes.map(r=>`<div class="rl" data-a="selr" data-v="${r.id}"><span class=sw style="background:${col(r.id)}"></span>R${r.id}: ${r.nb} bus, ${r.stops.length} stops, ${pn(r.d.rev-cost(r.d))}</div>`).join('')||'<span class=mut>No routes yet</span>'}
+function act(a,v){const r=routes.find(r=>r.id===v),s=sel&&sel.t==='s'?sel.o:null;
+ if(a==='spd'){spd=v;document.querySelectorAll('[data-a=spd]').forEach(b=>b.classList.toggle('on',+b.dataset.v===v))}
+ else if(a==='buy'){if(cash>=C.busPrice){cash-=C.busPrice;fleet++}else msg('Not enough cash')}
+ else if(a==='sell'){if(depot()>0){fleet--;cash+=C.busPrice/2}else msg('No idle bus (reduce a route first)')}
+ else if(a==='selr'&&r)sel={t:'r',o:r};else if(a==='bus+'&&r)setBuses(r,1);else if(a==='bus-'&&r)setBuses(r,-1);else if(a==='delr'&&r)delRoute(r);
+ else if(a==='addmode')mode=mode?'':'add';else if(a==='dels'&&s)delStop(s);else if(a==='addto'&&r&&s)addStopTo(r,s);
+ else if(a==='rmfrom'&&r&&s){const l=r.stops.filter(x=>x!==s);l.length<2?delRoute(r):edit(r,l)}
+ cv.style.cursor=mode?'cell':'crosshair';insp();hud()}
+document.addEventListener('pointerdown',e=>{const b=e.target.closest('[data-a]');if(b&&e.target.closest('#side'))act(b.dataset.a,+b.dataset.v)});
+// ---- input ----
+const X=x=>(x-V.x)*V.s,Y=y=>(V.y-y)*V.s,pt=e=>{const r=cv.getBoundingClientRect();return{x:V.x+(e.clientX-r.left)/V.s,y:V.y-(e.clientY-r.top)/V.s}};
+const hitStop=(p,px=14)=>stops.reduce((b,s)=>{const d=Math.hypot(s.x-p.x,s.y-p.y)*V.s;return d<=px&&(!b||d<b[0])?[d,s]:b},null)?.[1]||null;
+function hitRoute(p){for(const r of routes)for(let i=1;i<r.pts.length;i++){const[a,b]=[r.pts[i-1],r.pts[i]],dx=b[0]-a[0],dy=b[1]-a[1],t=Math.max(0,Math.min(1,((p.x-a[0])*dx+(p.y-a[1])*dy)/(dx*dx+dy*dy||1)));if(Math.hypot(a[0]+t*dx-p.x,a[1]+t*dy-p.y)*V.s<8)return r}return null}
+function placeAt(p){const n=nearNode(p.x,p.y,40/V.s);if(n<0){msg('No road nearby');return null}return mkStop(n)}
+cv.onmousedown=e=>{const p=pt(e);drag={sx:e.clientX,sy:e.clientY,vx:V.x,vy:V.y,s:hitStop(p),moved:false};drag.trail=drag.s?[drag.s]:[];drag.cur=p};
+cv.onmousemove=e=>{const p=pt(e);if(!drag){drag=null;return}drag.cur=p;if(Math.hypot(e.clientX-drag.sx,e.clientY-drag.sy)>4)drag.moved=true;if(!drag.moved)return;
+ if(drag.s){const h=hitStop(p);if(h&&!drag.trail.includes(h))drag.trail.push(h)}else{V.x=drag.vx-(e.clientX-drag.sx)/V.s;V.y=drag.vy+(e.clientY-drag.sy)/V.s}};
+addEventListener('mouseup',e=>{if(!drag)return;const d=drag;drag=null;if(e.target!==cv&&!d.moved)return;const p=pt(e),addR=mode&&sel&&sel.t==='r'?sel.o:null;
+ if(!d.moved){const s=d.s;if(s){addR?addStopTo(addR,s):sel={t:'s',o:s}}else{const r=!addR&&hitRoute(p);if(r)sel={t:'r',o:r};else{const s2=placeAt(p);if(s2){addR?addStopTo(addR,s2):sel={t:'s',o:s2}}}}}
+ else if(d.s){const tr=d.trail,end=hitStop(p)||placeAt(p);if(end&&!tr.includes(end))tr.push(end);
+  if(tr.length>=2){const r=sel&&sel.t==='r'&&sel.o;if(r&&tr[0]===r.stops[r.stops.length-1])edit(r,[...r.stops,...tr.slice(1).filter(s=>!r.stops.includes(s))]);
+   else if(r&&tr[0]===r.stops[0])edit(r,[...tr.slice(1).filter(s=>!r.stops.includes(s)).reverse(),...r.stops]);else mkRoute(tr)}}
+ insp();hud()});
+cv.onwheel=e=>{e.preventDefault();const k=e.deltaY<0?1.15:1/1.15,p=pt(e),r=cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;V.s*=k;V.x=p.x-mx/V.s;V.y=p.y+my/V.s};
+// ---- drawing ----
+function line(p,w,c,dash){g.beginPath();g.setLineDash(dash||[]);g.moveTo(X(p[0][0]),Y(p[0][1]));for(const q of p)g.lineTo(X(q[0]),Y(q[1]));g.lineWidth=w;g.strokeStyle=c;g.stroke();g.setLineDash([])}
+function draw(){g.fillStyle='#fff';g.fillRect(0,0,cv.width,cv.height);g.lineCap=g.lineJoin='round';const h=clock/60|0;
+ if($('oD').checked){const mx=Math.max(...M.zones.map(z=>z[2][h]),1),c=M.cell*V.s;M.zones.forEach(z=>{g.fillStyle=`rgba(255,90,20,${Math.min(.75,z[2][h]/mx*.8)})`;g.fillRect(X(z[0])-c/2,Y(z[1])-c/2,c,c)})}
+ for(const mj of[0,1]){g.beginPath();M.roads.forEach(r=>{if(r[0]!=mj)return;const p=r[1];g.moveTo(X(p[0]),Y(p[1]));for(let k=2;k<p.length;k+=2)g.lineTo(X(p[k]),Y(p[k+1]))});g.lineWidth=(mj?3:1.6)*Math.min(2,Math.max(.6,V.s*3));g.strokeStyle=mj?'#d2d2d2':'#e2e2e2';g.stroke()}
+ if($('oB').checked){const r=Math.max(1,V.s*3.5);M.bld.forEach(b=>{if(b[2]==5){g.fillStyle='rgba(110,190,110,.35)';g.beginPath();g.arc(X(b[0]),Y(b[1]),70*V.s,0,7);g.fill()}});
+  M.bld.forEach(b=>{if(b[2]==5)return;g.fillStyle=BC[b[2]];g.globalAlpha=b[2]?.95:.6;g.fillRect(X(b[0])-r/2,Y(b[1])-r/2,r*(b[2]?1.5:1),r*(b[2]?1.5:1))});g.globalAlpha=1}
+ if($('oR').checked)stops.forEach(s=>{const R=M.R*V.s,gr=g.createRadialGradient(X(s.x),Y(s.y),0,X(s.x),Y(s.y),R);gr.addColorStop(0,'rgba(30,120,255,.22)');gr.addColorStop(1,'rgba(30,120,255,0)');g.fillStyle=gr;g.beginPath();g.arc(X(s.x),Y(s.y),R,0,7);g.fill()});
+ routes.forEach(r=>line(r.pts,(sel&&sel.o===r?1.8:1)*Math.max(3,V.s*8),col(r.id)));
+ stops.forEach(s=>{const on=sel&&sel.o===s,n=s.routes.length;g.beginPath();g.arc(X(s.x),Y(s.y),n>1?7:5.5,0,7);g.fillStyle=n?'#fff':'#ccc';g.fill();g.lineWidth=on?4:2;g.strokeStyle=on?'#1e78ff':n>1?'#000':'#444';g.stroke();
+  if(s.wait.length){g.font='bold 10px system-ui';const t=''+s.wait.length,w=g.measureText(t).width+6;g.fillStyle=s.wait.length>15?'#c62828':'#e08a00';g.beginPath();g.roundRect(X(s.x)+6,Y(s.y)-16,w,12,4);g.fill();g.fillStyle='#fff';g.fillText(t,X(s.x)+9,Y(s.y)-6)}});
+ if(svc)routes.forEach(r=>r.buses.forEach(b=>{const[x,y]=pos(r,b.u);g.fillStyle=col(r.id);g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.roundRect(X(x)-11,Y(y)-7,22,14,4);g.fill();g.stroke();
+  g.fillStyle='#fff';g.font='bold 10px system-ui';g.textAlign='center';g.fillText(b.pax.length,X(x),Y(y)+3.5);g.textAlign='left'}));
+ if(drag&&drag.moved&&drag.s){const p=drag.trail.map(s=>[s.x,s.y]);p.push([drag.cur.x,drag.cur.y]);line(p,4,'#1e78ff',[8,6])}}
+// ---- main loop ----
+let last=0,acc=0;function tick(t){const dt=Math.min(100,t-last)/1000;last=t;if(spd){let m=dt*spd;while(m>0){const s=Math.min(.25,m);step(s);m-=s}}
+ if(!tick.n||t-tick.n>400){tick.n=t;insp()}hud();draw();requestAnimationFrame(tick)}
+function size(){cv.width=cv.clientWidth;cv.height=cv.clientHeight}addEventListener('resize',size);
+function load(d){M=d.map;build();$('drop').hidden=true;$('ui').hidden=false;size();const b=M.bounds;V.s=Math.min(cv.width/(b[2]-b[0]),cv.height/(b[3]-b[1]))*.95;V.x=(b[0]+b[2])/2-cv.width/2/V.s;V.y=(b[1]+b[3])/2+cv.height/2/V.s;requestAnimationFrame(tick)}
+$('file').onchange=e=>e.target.files[0].text().then(t=>load(JSON.parse(t)));
+const emb=$('data').textContent.trim();if(emb)load(JSON.parse(emb));
+</script></body></html>

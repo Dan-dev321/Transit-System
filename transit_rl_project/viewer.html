@@ -1,0 +1,61 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Transit RL viewer</title>
+<style>
+:root{--bg:#fff;--fg:#222;--mut:#777;--pan:#f6f6f4;--bd:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#1d1d1f;--fg:#eee;--mut:#999;--pan:#26262a;--bd:#3a3a3f}}
+html,body{height:100%;margin:0;font:13px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+body{display:flex}#side{width:260px;padding:12px;background:var(--pan);border-right:1px solid var(--bd);overflow:auto;box-sizing:border-box}
+#cv{flex:1;min-width:0;display:block;cursor:grab;background:#fff}
+h3{margin:.2em 0 .5em;font-size:14px}label{display:block;margin:3px 0}input[type=range]{width:100%}
+table{width:100%;border-collapse:collapse}td{padding:2px 0}td+td{text-align:right}
+.mut{color:var(--mut)}.sw{display:inline-block;width:12px;height:4px;margin-right:6px;vertical-align:middle;border-radius:2px}
+button{padding:4px 10px}#drop{padding:30px;text-align:center}
+</style></head><body>
+<div id="side"><h3>Transit RL viewer</h3><div id="ui" hidden>
+<div class="mut" id="lab"></div><input id="fr" type="range" min="0" value="0">
+<div style="margin-top:8px">Time <b id="clk"></b> <button id="pl">▶</button></div><input id="tm" type="range" min="0" max="1439" value="480">
+<div style="margin:8px 0"><label><input type="checkbox" id="oB" checked> buildings / parks</label><label><input type="checkbox" id="oR" checked> stop catchments</label>
+<label><input type="checkbox" id="oD"> demand heat (this hour)</label><label><input type="checkbox" id="oU" checked> buses</label></div>
+<table id="met"></table><h3 style="margin-top:10px">Routes</h3><div id="leg"></div></div>
+<div id="drop">Load a <code>viewer_data.json</code> exported by the Python package:<br><br><input type="file" id="file" accept=".json"></div></div>
+<canvas id="cv"></canvas>
+<script id="data" type="application/json"></script>
+<script>
+const $=i=>document.getElementById(i),cv=$('cv'),g=cv.getContext('2d');
+const BC=['#cdbfae','#f0a64a','#3fa7a0','#9b7fbf','#4a7fd6','#7cc27c','#bbb'];
+let D,fi=0,clock=480,play=false,V={s:1,x:0,y:0};
+const col=i=>`hsl(${(i*137.508)%360},70%,${i%2?42:50}%)`;
+function load(d){D=d;const b=d.map.bounds;$('drop').hidden=true;$('ui').hidden=false;
+ d.frames.forEach(f=>f.routes.forEach(r=>{const c=[0];for(let k=2;k<r.p.length;k+=2)c.push(c[c.length-1]+Math.hypot(r.p[k]-r.p[k-2],r.p[k+1]-r.p[k-1]));r.c=c;r.L=c[c.length-1]}));
+ $('fr').max=d.frames.length-1;$('fr').value=fi=d.frames.length-1;size();V.s=Math.min(cv.width/(b[2]-b[0]),cv.height/(b[3]-b[1]))*.95;
+ V.x=(b[0]+b[2])/2-cv.width/2/V.s;V.y=(b[1]+b[3])/2+cv.height/2/V.s;panel();requestAnimationFrame(tick)}
+function size(){cv.width=cv.clientWidth;cv.height=cv.clientHeight}addEventListener('resize',size);
+const X=x=>(x-V.x)*V.s,Y=y=>(V.y-y)*V.s;
+function panel(){const f=D.frames[fi],m=f.m;$('lab').textContent=`Frame ${fi}/${D.frames.length-1}: ${f.label}`;
+ const row=(a,b)=>`<tr><td class=mut>${a}</td><td>${b}</td></tr>`;
+ $('met').innerHTML=row('Score',m.score)+row('Riders / day',Math.round(m.riders).toLocaleString())+row('Coverage',(m.coverage*100|0)+'%')+row('Connectivity',m.connect)+
+  row('Avg wait',m.avg_wait+' min')+row('Avg trip',m.avg_time+' min')+row('Bus load factor',(m.load_factor*100|0)+'%')+row('Unmet (crowding)',(m.unmet*100|0)+'%')+
+  row('Stops / routes / buses',`${m.stops} / ${m.routes} / ${m.buses}`)+row('Overlap · empty stops · idle routes',`${m.overlap} · ${m.empty_stops} · ${m.idle_routes}`);
+ $('leg').innerHTML=f.routes.map(r=>`<div><span class=sw style="background:${col(r.i)}"></span>R${r.i+1}: ${r.s.length} stops, ${r.b} bus${r.b>1?'es':''}, ${r.h}-min headway, ${r.n} pax</div>`).join('')||'<span class=mut>none yet</span>'}
+function line(p,w,c){g.beginPath();g.moveTo(X(p[0]),Y(p[1]));for(let k=2;k<p.length;k+=2)g.lineTo(X(p[k]),Y(p[k+1]));g.lineWidth=w;g.strokeStyle=c;g.stroke()}
+function draw(){const M=D.map,f=D.frames[fi],h=Math.floor(clock/60)%24;g.fillStyle='#fff';g.fillRect(0,0,cv.width,cv.height);g.lineCap=g.lineJoin='round';
+ if($('oD').checked){const mx=Math.max(...M.zones.map(z=>z[2][h]),1),c=M.cell*V.s;M.zones.forEach(z=>{g.fillStyle=`rgba(255,90,20,${Math.min(.75,z[2][h]/mx*.8)})`;g.fillRect(X(z[0])-c/2,Y(z[1])-c/2,c,c)})}
+ for(const mj of [0,1]){g.beginPath();M.roads.forEach(r=>{if(r[0]!=mj)return;const p=r[1];g.moveTo(X(p[0]),Y(p[1]));for(let k=2;k<p.length;k+=2)g.lineTo(X(p[k]),Y(p[k+1]))});g.lineWidth=(mj?3:1.6)*Math.min(2,Math.max(.6,V.s*3));g.strokeStyle=mj?'#d2d2d2':'#e2e2e2';g.stroke()}
+ if($('oB').checked){const r=Math.max(1,V.s*3.5);M.bld.forEach(b=>{if(b[2]==5){g.fillStyle='rgba(110,190,110,.35)';g.beginPath();g.arc(X(b[0]),Y(b[1]),70*V.s,0,7);g.fill()}});
+  M.bld.forEach(b=>{if(b[2]==5)return;g.fillStyle=BC[b[2]];g.globalAlpha=b[2]?.95:.6;g.fillRect(X(b[0])-r/2,Y(b[1])-r/2,r*(b[2]?1.5:1),r*(b[2]?1.5:1))});g.globalAlpha=1}
+ if($('oR').checked)f.stops.forEach(s=>{const R=M.R*V.s,gr=g.createRadialGradient(X(s[0]),Y(s[1]),0,X(s[0]),Y(s[1]),R);gr.addColorStop(0,'rgba(30,120,255,.22)');gr.addColorStop(1,'rgba(30,120,255,0)');g.fillStyle=gr;g.beginPath();g.arc(X(s[0]),Y(s[1]),R,0,7);g.fill()});
+ f.routes.forEach(r=>line(r.p,Math.max(3,V.s*10),col(r.i)));
+ const cnt={};f.routes.forEach(r=>r.s.forEach(s=>{const k=s+'';cnt[k]=(cnt[k]||0)+1}));
+ f.stops.forEach(s=>{const n=cnt[s+'']||0;g.beginPath();g.arc(X(s[0]),Y(s[1]),n>1?6:4.5,0,7);g.fillStyle=n?'#fff':'#ccc';g.fill();g.lineWidth=2;g.strokeStyle=n>1?'#000':n?'#444':'#999';g.stroke()});
+ if($('oU').checked&&h>=M.service[0]&&h<M.service[1])f.routes.forEach(r=>{for(let b=0;b<r.b;b++){let s=(clock*60*7+b*2*r.L/r.b)%(2*r.L);if(s>r.L)s=2*r.L-s;let lo=0,hi=r.c.length-1;while(hi-lo>1){const m=lo+hi>>1;r.c[m]<=s?lo=m:hi=m}
+  const t=(s-r.c[lo])/Math.max(1e-6,r.c[hi]-r.c[lo]),x=r.p[2*lo]+t*(r.p[2*hi]-r.p[2*lo]),y=r.p[2*lo+1]+t*(r.p[2*hi+1]-r.p[2*lo+1]);
+  g.fillStyle=col(r.i);g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.roundRect(X(x)-7,Y(y)-4.5,14,9,3);g.fill();g.stroke()}});
+ $('clk').textContent=String(h).padStart(2,'0')+':'+String(Math.floor(clock%60)).padStart(2,'0')}
+let last=0;function tick(t){if(play){clock=(clock+(t-last)/1000*2)%1440;$('tm').value=clock}last=t;draw();requestAnimationFrame(tick)}
+$('fr').oninput=e=>{fi=+e.target.value;panel()};$('tm').oninput=e=>clock=+e.target.value;$('pl').onclick=()=>{play=!play;$('pl').textContent=play?'❚❚':'▶'};
+cv.onmousedown=e=>{const x0=e.clientX,y0=e.clientY,vx=V.x,vy=V.y;cv.onmousemove=m=>{V.x=vx-(m.clientX-x0)/V.s;V.y=vy+(m.clientY-y0)/V.s}};
+cv.onmouseup=cv.onmouseleave=()=>cv.onmousemove=null;
+cv.onwheel=e=>{e.preventDefault();const k=e.deltaY<0?1.15:1/1.15,r=cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,wx=V.x+mx/V.s,wy=V.y-my/V.s;V.s*=k;V.x=wx-mx/V.s;V.y=wy+my/V.s};
+$('file').onchange=e=>e.target.files[0].text().then(t=>load(JSON.parse(t)));
+const emb=$('data').textContent.trim();if(emb)load(JSON.parse(emb));
+</script></body></html>
